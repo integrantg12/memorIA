@@ -11,12 +11,9 @@ permissions:
 jobs:
   apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       PRIVACY_STRICT: '1'
-    defaults:
-      run:
-        working-directory: memoria-source
     steps:
       - uses: actions/checkout@v4
 
@@ -29,22 +26,51 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Instalar dependencias
-        run: npm ci --legacy-peer-deps
-
-      - name: Gerar projeto Android
-        run: npx expo prebuild --platform android --no-install
+      - name: Aplicar atualizacao (memoria-update.zip)
+        run: |
+          mkdir -p out
+          if [ -f memoria-update.zip ]; then unzip -o memoria-update.zip -d memoria-source; fi
 
       - name: Compilar APK
-        run: cd android && ./gradlew assembleRelease --no-daemon
+        working-directory: memoria-source
+        run: |
+          set -o pipefail
+          ( npm ci --legacy-peer-deps && npx expo prebuild --platform android --no-install && cd android && ./gradlew assembleRelease --no-daemon ) 2>&1 | tee ../out/log-compilacao.txt
+          cp android/app/build/outputs/apk/release/app-release.apk ../out/memorIA.apk
 
-      - name: Renomear APK
-        run: cp android/app/build/outputs/apk/release/app-release.apk ../memorIA.apk
+      - name: Preparar teste
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          cat > smoke-test.sh <<'EOF'
+          adb install -r -g out/memorIA.apk > out/teste-instalacao.txt 2>&1
+          adb logcat -c
+          adb shell am start -n app.memoria.local/.MainActivity
+          sleep 45
+          adb exec-out screencap -p > out/teste-tela.png
+          adb logcat -d -v time > out/teste-logcat.txt
+          grep -E "AndroidRuntime|ReactNativeJS|FATAL|memorIA|Exception|Error" out/teste-logcat.txt > out/teste-erros.txt
+          (adb shell pidof app.memoria.local || echo "APP NAO ESTA RODANDO") > out/teste-processo.txt
+          exit 0
+          EOF
+
+      - name: Testar em celular virtual
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: bash smoke-test.sh
 
       - name: Publicar para download
+        if: always()
         uses: softprops/action-gh-release@v2
         with:
           tag_name: apk-${{ github.run_number }}
           name: memorIA (versao ${{ github.run_number }})
           body: Baixe o arquivo memorIA.apk abaixo e abra no celular Android para instalar.
-          files: memorIA.apk
+          files: out/*
+          fail_on_unmatched_files: false
